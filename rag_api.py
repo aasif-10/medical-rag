@@ -551,6 +551,7 @@ Provide the correct answer with a brief 2-3 sentence explanation."""
                 )
                 
                 # Return answer with contexts (even if they weren't used for the answer)
+                print(f"🔧 DEBUG: Returning {len(contexts)} contexts with MCQ fallback answer")
                 return QueryResponse(
                     answer=fallback_answer,
                     contexts=contexts  # Include contexts found in database
