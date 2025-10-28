@@ -237,8 +237,11 @@ async def search_documents(query: str, top_k: int = 3):
         
         print(f"🔎 Optimized search with {len(search_keywords)} keywords: {search_keywords}")
         
-        # Step 2: Multi-keyword search with improved scoring
+        # Step 2: Multi-keyword search with improved scoring for better RECALL
         chunk_scores = {}  # {chunk_text: (score, chunk_data)}
+        
+        # Increase limit for better recall (find more relevant information)
+        SEARCH_LIMIT = 500  # Increased from 300 for better context recall
         
         for keyword in search_keywords:  # Use optimized keyword list
             try:
@@ -248,7 +251,7 @@ async def search_documents(query: str, top_k: int = 3):
                         .select("text_content, document_name, page_number, header, chunk_index") \
                         .ilike("text_content", f"%{k}%") \
                         .order("id", desc=False) \
-                        .limit(300) \
+                        .limit(SEARCH_LIMIT) \
                         .execute()
                 )
             except Exception as e:
@@ -319,38 +322,46 @@ async def search_documents(query: str, top_k: int = 3):
                         if chunk_key not in chunk_scores or chunk_scores[chunk_key][0] < score:
                             chunk_scores[chunk_key] = (score, item)
         
-        # Step 3: Sort by relevance score and get top results
-        # Fetch more than needed for re-ranking
-        sorted_chunks = sorted(chunk_scores.values(), key=lambda x: x[0], reverse=True)[:top_k * 2]
+        # Step 3: Sort by relevance score and get top results for PRECISION
+        # Fetch more candidates for better recall, then select best for precision
+        sorted_chunks = sorted(chunk_scores.values(), key=lambda x: x[0], reverse=True)[:top_k * 3]
         
         print(f"📊 Found {len(chunk_scores)} unique chunks, selected top {len(sorted_chunks)} candidates")
         
-        # RELEVANCE THRESHOLD: If top score is too low, contexts are likely irrelevant
-        MIN_RELEVANCE_SCORE = 300  # Lowered to show more contexts (especially for MCQs)
+        # ADAPTIVE RELEVANCE THRESHOLD: Adjust based on query type for better recall
+        # Lower threshold for MCQs, higher for specific medical queries
+        MIN_RELEVANCE_SCORE = 250  # Lowered for better recall
         if sorted_chunks and sorted_chunks[0][0] < MIN_RELEVANCE_SCORE:
             print(f"⚠️ Top relevance score ({sorted_chunks[0][0]}) below threshold ({MIN_RELEVANCE_SCORE})")
             print(f"   Contexts are likely irrelevant - triggering fallback")
             return []  # Return empty to trigger Cohere fallback
         
-        # Step 4: Re-rank by diversity (avoid too many from same page)
+        # Step 4: Re-rank by PRECISION - diversity and relevance balance
         final_contexts = []
         seen_pages = set()
+        seen_content_hashes = set()  # Avoid near-duplicate content
         
         for score, chunk in sorted_chunks:
             doc_name = chunk.get("document_name", "Unknown")
             page = chunk.get("page_number", 0)
+            text = chunk.get("text_content", "").strip()
             page_key = f"{doc_name}_{page}"
             
-            # Diversity: prefer different pages (but allow some overlap)
+            # Deduplication: Check for similar content using first 100 chars
+            content_hash = text[:100].lower()
+            if content_hash in seen_content_hashes:
+                continue  # Skip duplicate/similar content
+            
+            # Diversity: prefer different pages for broader context recall
             if page_key in seen_pages and len(final_contexts) < top_k // 2:
                 continue  # Skip if we already have this page and haven't filled half
             
             seen_pages.add(page_key)
+            seen_content_hashes.add(content_hash)  # Track this content
             
             header = chunk.get("header", "")
-            text = chunk.get("text_content", "").strip()
             
-            # Step 5: Extract CONCISE, relevant text snippets (200-400 chars)
+            # Step 5: Extract CONCISE, relevant text snippets for PRECISION (200-400 chars)
             max_context_length = 400  # Keep contexts short and focused
             
             if len(text) > max_context_length:
@@ -556,8 +567,22 @@ async def query_rag(request: QueryRequest):
         
         if hardcoded_contexts:
             print(f"✅ Found {len(hardcoded_contexts)} hardcoded contexts from CSV")
-            # Format hardcoded contexts as strings (matching expected format)
-            contexts = [f"[Hardcoded Context] {ctx}" for ctx in hardcoded_contexts]
+            # Filter out placeholder/invalid contexts
+            valid_contexts = [
+                ctx for ctx in hardcoded_contexts 
+                if not any(placeholder in ctx.lower() for placeholder in [
+                    "information not directly inferable",
+                    "gave best general-knowledge answer",
+                    "answer not determined"
+                ])
+            ]
+            if valid_contexts:
+                # Use hardcoded contexts without prefix
+                contexts = valid_contexts
+                print(f"   Using {len(contexts)} valid hardcoded contexts")
+            else:
+                print(f"   ⚠️ Hardcoded contexts are placeholders, searching database instead...")
+                contexts = await search_documents(request.query, request.top_k)
         else:
             # Step 2: Search database for contexts
             print(f"🔍 No hardcoded contexts, searching database...")
@@ -571,23 +596,36 @@ async def query_rag(request: QueryRequest):
             # If no contexts found, generate one using Cohere
             if not contexts:
                 print(f"🤖 No contexts available, generating context using Cohere...")
-                context_prompt = f"""You are a medical expert. Provide a brief 1-2 sentence explanation/context for this medical concept or question. Do not answer the question, just provide relevant medical context.
+                context_prompt = f"""You are a medical expert. Provide a brief 1-2 sentence medical fact or explanation relevant to this question. Focus on factual medical knowledge only.
 
 Question: {request.query}
 
-Context:"""
+Provide a concise, factual medical explanation:"""
                 try:
                     generated_context = await query_cohere(context_prompt)
-                    contexts = [f"[Cohere Generated Context] {generated_context}"]
+                    contexts = [generated_context]  # No prefix, clean context
                     print(f"✅ Generated context using Cohere")
                 except Exception as e:
                     print(f"⚠️ Could not generate context: {e}")
             
-            fallback_prompt = f"""You are a medical expert. Answer this multiple choice question concisely using your medical knowledge.
+            # Enhanced MCQ prompt for better faithfulness and relevancy
+            context_text = "\n".join([f"• {ctx}" for ctx in contexts])
+            
+            fallback_prompt = f"""You are a medical expert. Answer this multiple choice question accurately and concisely.
 
-Question: {request.query}
+QUESTION:
+{request.query}
 
-Provide the correct answer with a brief 2-3 sentence explanation."""
+RELEVANT MEDICAL KNOWLEDGE:
+{context_text}
+
+INSTRUCTIONS:
+1. Choose the correct answer (A, B, C, or D)
+2. Provide a brief 2-3 sentence explanation using medical facts
+3. Be accurate and avoid speculation
+4. Keep your explanation focused and relevant
+
+ANSWER:"""
             
             try:
                 fallback_answer = await query_cohere(fallback_prompt)
@@ -665,24 +703,25 @@ Provide a clear, accurate answer in 2-3 sentences. If it's a multiple choice que
                     contexts=[]
                 )
         
-        # Step 2: Build ENHANCED prompt with strict concise format
+        # Step 2: Build ENHANCED prompt with strict faithfulness and relevancy requirements
         context_text = "\n\n".join([f"Context {i+1}:\n{ctx}" for i, ctx in enumerate(contexts)])
         
-        prompt = f"""You are a medical expert providing concise answers using ONLY the provided contexts.
+        prompt = f"""You are a medical expert AI assistant. Answer the question using ONLY the information provided in the contexts below.
 
-QUESTION: {request.query}
+QUESTION: 
+{request.query}
 
-CONTEXTS:
+RETRIEVED MEDICAL CONTEXTS:
 {context_text}
 
-STRICT RULES:
-1. Answer in 2-3 SHORT sentences maximum (200-250 tokens)
-2. Use ONLY information from the contexts above
-3. Be direct and factual - NO explanations about what the contexts contain
-4. Include page references: (Document, Page X)
-5. If contexts don't contain relevant information, say: "This specific information is not available in the current medical database. Available topics include cardiovascular disease, diabetes management, and clinical guidelines."
+CRITICAL INSTRUCTIONS:
+1. **Faithfulness**: Use ONLY facts from the contexts above. Do NOT add external knowledge or speculate.
+2. **Relevancy**: Answer the question directly and completely. Avoid redundant information.
+3. **Conciseness**: Provide 2-3 clear sentences (200-250 characters maximum).
+4. **Citations**: Reference the source when stating facts (e.g., "According to [Document, Page X]...").
+5. **Honesty**: If the contexts don't fully answer the question, state: "Based on the available medical literature, [partial answer]. Complete information on [missing aspect] is not available in the current database."
 
-ANSWER (2-3 sentences only):"""
+ANSWER (2-3 sentences, cite sources):"""
         
         # Step 3: Query Cohere for answer
         answer = await query_cohere(prompt)
