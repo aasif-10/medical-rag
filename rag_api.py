@@ -38,7 +38,7 @@ def load_hardcoded_contexts():
                     # Normalize query for matching (remove extra whitespace, lowercase)
                     normalized_query = ' '.join(query.lower().split())
                     HARDCODED_CONTEXTS[normalized_query] = contexts
-        print(f"✅ Loaded {len(HARDCODED_CONTEXTS)} hardcoded context mappings from CSV")
+        print(f"✅ Loaded {len(HARDCODED_CONTEXTS)} hardcoded context mappings from CSV (contexts are strings)")
     except Exception as e:
         print(f"⚠️ Could not load hardcoded contexts: {e}")
 
