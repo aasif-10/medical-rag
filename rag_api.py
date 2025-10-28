@@ -299,6 +299,13 @@ async def search_documents(query: str, top_k: int = 3):
         
         print(f"📊 Found {len(chunk_scores)} unique chunks, selected top {len(sorted_chunks)} candidates")
         
+        # RELEVANCE THRESHOLD: If top score is too low, contexts are likely irrelevant
+        MIN_RELEVANCE_SCORE = 700  # Minimum score to consider results relevant (very strict to avoid false matches)
+        if sorted_chunks and sorted_chunks[0][0] < MIN_RELEVANCE_SCORE:
+            print(f"⚠️ Top relevance score ({sorted_chunks[0][0]}) below threshold ({MIN_RELEVANCE_SCORE})")
+            print(f"   Contexts are likely irrelevant - triggering fallback")
+            return []  # Return empty to trigger Cohere fallback
+        
         # Step 4: Re-rank by diversity (avoid too many from same page)
         final_contexts = []
         seen_pages = set()
@@ -513,23 +520,96 @@ async def query_rag(request: QueryRequest):
     }
     """
     try:
-        # Step 1: Search for relevant contexts
+        # DETECT MCQ FORMAT: If query contains "A. ... B. ... C. ... D. ..." pattern
+        query_text = request.query.lower()
+        is_mcq = bool(re.search(r'\ba\.\s*.+\bb\.\s*.+\bc\.\s*.+\bd\.', query_text, re.DOTALL))
+        
+        if is_mcq:
+            # MCQ DETECTED: Skip RAG and use Cohere's pre-trained knowledge directly
+            print(f"📝 MCQ format detected - Using Cohere fallback directly")
+            print(f"Question: {request.query[:80]}...")
+            
+            fallback_prompt = f"""You are a medical expert. Answer this multiple choice question concisely using your medical knowledge.
+
+Question: {request.query}
+
+Provide the correct answer with a brief 2-3 sentence explanation."""
+            
+            try:
+                fallback_answer = await query_cohere(fallback_prompt)
+                
+                # Log query with fallback response
+                await log_query(
+                    query=request.query,
+                    top_k=request.top_k,
+                    contexts_found=0,
+                    success=True,
+                    response_preview=f"[MCQ-FALLBACK] {fallback_answer[:200]}"
+                )
+                
+                return QueryResponse(
+                    answer=fallback_answer,
+                    contexts=[]
+                )
+            except Exception as e:
+                print(f"❌ MCQ Fallback failed: {e}")
+                await log_query(
+                    query=request.query,
+                    top_k=request.top_k,
+                    contexts_found=0,
+                    success=False,
+                    error_message=str(e)
+                )
+                
+                return QueryResponse(
+                    answer="Unable to generate answer. Please try rephrasing your question.",
+                    contexts=[]
+                )
+        
+        # Step 1: Search for relevant contexts (NON-MCQ questions)
         contexts = await search_documents(request.query, request.top_k)
         
         if not contexts:
-            # Log query with no results
-            await log_query(
-                query=request.query,
-                top_k=request.top_k,
-                contexts_found=0,
-                success=True,
-                response_preview="No relevant information found in the indexed documents."
-            )
+            # FALLBACK: Use Cohere's pre-trained knowledge when RAG finds nothing
+            print(f"⚠️ No RAG contexts found for: {request.query}")
+            print(f"🤖 Using Cohere's pre-trained medical knowledge as fallback...")
             
-            return QueryResponse(
-                answer="No relevant information found in the indexed documents.",
-                contexts=[]
-            )
+            fallback_prompt = f"""You are a medical expert. Answer this medical question concisely using your medical knowledge.
+
+Question: {request.query}
+
+Provide a clear, accurate answer in 2-3 sentences. If it's a multiple choice question, explain the correct answer briefly."""
+            
+            try:
+                fallback_answer = await query_cohere(fallback_prompt)
+                
+                # Log query with fallback response
+                await log_query(
+                    query=request.query,
+                    top_k=request.top_k,
+                    contexts_found=0,
+                    success=True,
+                    response_preview=f"[FALLBACK] {fallback_answer[:200]}"
+                )
+                
+                return QueryResponse(
+                    answer=fallback_answer,
+                    contexts=[]
+                )
+            except Exception as e:
+                print(f"❌ Fallback failed: {e}")
+                await log_query(
+                    query=request.query,
+                    top_k=request.top_k,
+                    contexts_found=0,
+                    success=False,
+                    error_message=str(e)
+                )
+                
+                return QueryResponse(
+                    answer="Unable to generate answer. Please try rephrasing your question.",
+                    contexts=[]
+                )
         
         # Step 2: Build ENHANCED prompt with strict concise format
         context_text = "\n\n".join([f"Context {i+1}:\n{ctx}" for i, ctx in enumerate(contexts)])
@@ -546,7 +626,7 @@ STRICT RULES:
 2. Use ONLY information from the contexts above
 3. Be direct and factual - NO explanations about what the contexts contain
 4. Include page references: (Document, Page X)
-5. If contexts are irrelevant, say "Information not available in provided documents"
+5. If contexts don't contain relevant information, say: "This specific information is not available in the current medical database. Available topics include cardiovascular disease, diabetes management, and clinical guidelines."
 
 ANSWER (2-3 sentences only):"""
         
