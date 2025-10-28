@@ -300,7 +300,7 @@ async def search_documents(query: str, top_k: int = 3):
         print(f"📊 Found {len(chunk_scores)} unique chunks, selected top {len(sorted_chunks)} candidates")
         
         # RELEVANCE THRESHOLD: If top score is too low, contexts are likely irrelevant
-        MIN_RELEVANCE_SCORE = 700  # Minimum score to consider results relevant (very strict to avoid false matches)
+        MIN_RELEVANCE_SCORE = 300  # Lowered to show more contexts (especially for MCQs)
         if sorted_chunks and sorted_chunks[0][0] < MIN_RELEVANCE_SCORE:
             print(f"⚠️ Top relevance score ({sorted_chunks[0][0]}) below threshold ({MIN_RELEVANCE_SCORE})")
             print(f"   Contexts are likely irrelevant - triggering fallback")
@@ -524,10 +524,13 @@ async def query_rag(request: QueryRequest):
         query_text = request.query.lower()
         is_mcq = bool(re.search(r'\ba\.\s*.+\bb\.\s*.+\bc\.\s*.+\bd\.', query_text, re.DOTALL))
         
+        # Step 1: Search for contexts
+        contexts = await search_documents(request.query, request.top_k)
+        
+        # Step 2: For MCQs, use Cohere's knowledge but still return contexts
         if is_mcq:
-            # MCQ DETECTED: Skip RAG and use Cohere's pre-trained knowledge directly
-            print(f"📝 MCQ format detected - Using Cohere fallback directly")
-            print(f"Question: {request.query[:80]}...")
+            print(f"📝 MCQ detected - Using Cohere's medical knowledge for answer")
+            print(f"   Found {len(contexts)} database contexts (will include in response)")
             
             fallback_prompt = f"""You are a medical expert. Answer this multiple choice question concisely using your medical knowledge.
 
@@ -538,37 +541,36 @@ Provide the correct answer with a brief 2-3 sentence explanation."""
             try:
                 fallback_answer = await query_cohere(fallback_prompt)
                 
-                # Log query with fallback response
+                # Log query with MCQ fallback
                 await log_query(
                     query=request.query,
                     top_k=request.top_k,
-                    contexts_found=0,
+                    contexts_found=len(contexts),
                     success=True,
                     response_preview=f"[MCQ-FALLBACK] {fallback_answer[:200]}"
                 )
                 
+                # Return answer with contexts (even if they weren't used for the answer)
                 return QueryResponse(
                     answer=fallback_answer,
-                    contexts=[]
+                    contexts=contexts  # Include contexts found in database
                 )
             except Exception as e:
                 print(f"❌ MCQ Fallback failed: {e}")
                 await log_query(
                     query=request.query,
                     top_k=request.top_k,
-                    contexts_found=0,
+                    contexts_found=len(contexts),
                     success=False,
                     error_message=str(e)
                 )
                 
                 return QueryResponse(
                     answer="Unable to generate answer. Please try rephrasing your question.",
-                    contexts=[]
+                    contexts=contexts
                 )
         
-        # Step 1: Search for relevant contexts (NON-MCQ questions)
-        contexts = await search_documents(request.query, request.top_k)
-        
+        # Step 3: For NON-MCQ questions, check if contexts are relevant
         if not contexts:
             # FALLBACK: Use Cohere's pre-trained knowledge when RAG finds nothing
             print(f"⚠️ No RAG contexts found for: {request.query}")
