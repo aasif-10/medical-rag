@@ -37,7 +37,15 @@ def load_hardcoded_contexts():
                 if contexts:
                     # Normalize query for matching (remove extra whitespace, lowercase)
                     normalized_query = ' '.join(query.lower().split())
-                    HARDCODED_CONTEXTS[normalized_query] = contexts
+                    # Ensure all contexts are strings (handle dict or string format)
+                    string_contexts = []
+                    for ctx in contexts:
+                        if isinstance(ctx, dict):
+                            # If context is a dict, extract the 'content' field
+                            string_contexts.append(ctx.get('content', str(ctx)))
+                        else:
+                            string_contexts.append(str(ctx))
+                    HARDCODED_CONTEXTS[normalized_query] = string_contexts
         print(f"✅ Loaded {len(HARDCODED_CONTEXTS)} hardcoded context mappings from CSV (contexts are strings)")
     except Exception as e:
         print(f"⚠️ Could not load hardcoded contexts: {e}")
@@ -761,9 +769,17 @@ ANSWER (2-3 sentences, cite sources, use ONLY context information):"""
             response_preview=answer
         )
         
+        # Ensure all contexts are strings (safeguard against dict/object contexts)
+        string_contexts = []
+        for ctx in contexts:
+            if isinstance(ctx, dict):
+                string_contexts.append(ctx.get('content', str(ctx)))
+            else:
+                string_contexts.append(str(ctx))
+        
         return QueryResponse(
             answer=answer,
-            contexts=contexts
+            contexts=string_contexts
         )
         
     except Exception as e:
