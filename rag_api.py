@@ -590,11 +590,24 @@ async def query_rag(request: QueryRequest):
                 print(f"   Using {len(contexts)} valid hardcoded contexts")
             else:
                 print(f"   ⚠️ Hardcoded contexts are placeholders, searching database instead...")
-                contexts = await search_documents(request.query, request.top_k)
+                # For MCQs without valid hardcoded contexts, extract key medical terms
+                if is_mcq:
+                    print(f"🔬 Extracting medical terms from MCQ for better context retrieval...")
+                    # Extract key medical terms from MCQ (before the options)
+                    mcq_question = request.query.split('\n\nA.')[0] if '\n\nA.' in request.query else request.query
+                    contexts = await search_documents(mcq_question, request.top_k)
+                else:
+                    contexts = await search_documents(request.query, request.top_k)
         else:
             # Step 2: Search database for contexts
-            print(f"🔍 No hardcoded contexts, searching database...")
-            contexts = await search_documents(request.query, request.top_k)
+            if is_mcq:
+                print(f"🔬 Searching for MCQ-relevant contexts...")
+                # Extract just the question part (without options) for cleaner search
+                mcq_question = request.query.split('\n\nA.')[0] if '\n\nA.' in request.query else request.query
+                contexts = await search_documents(mcq_question, request.top_k)
+            else:
+                print(f"🔍 No hardcoded contexts, searching database...")
+                contexts = await search_documents(request.query, request.top_k)
         
         # Step 3: For MCQs, use Cohere's knowledge but include contexts
         if is_mcq:
