@@ -625,39 +625,44 @@ async def query_rag(request: QueryRequest):
             # If no contexts found, generate one using Cohere
             if not contexts:
                 print(f"🤖 No contexts available, generating context using Cohere...")
-                context_prompt = f"""You are a medical expert. Provide a brief 1-2 sentence medical fact or explanation relevant to this question. Focus on factual medical knowledge only.
+                context_prompt = f"""You are a medical expert. Provide ONLY established, verified medical facts about this question. Do NOT speculate or add uncertain information.
 
 Question: {request.query}
 
-Provide a concise, factual medical explanation:"""
+Provide 1-2 sentences of FACTUAL medical knowledge ONLY (no speculation):"""
                 try:
                     generated_context = await query_cohere(context_prompt)
                     contexts = [generated_context]  # No prefix, clean context
-                    print(f"✅ Generated context using Cohere")
+                    print(f"✅ Generated factual context using Cohere")
                 except Exception as e:
                     print(f"⚠️ Could not generate context: {e}")
             
-            # Ultra-strict MCQ prompt for maximum faithfulness
+            # Ultra-strict MCQ prompt to prevent hallucination
             context_text = "\n".join([f"• {ctx}" for ctx in contexts])
             
-            fallback_prompt = f"""You are a medical expert. Answer this MCQ using the provided knowledge.
+            fallback_prompt = f"""You are a medical expert answering an MCQ exam question. You must be highly accurate and never hallucinate.
 
 QUESTION:
 {request.query}
 
-MEDICAL KNOWLEDGE:
+MEDICAL KNOWLEDGE PROVIDED:
 {context_text}
 
-STRICT INSTRUCTIONS FOR HIGH ACCURACY:
-1. Choose the correct answer (A, B, C, or D) based on medical facts
-2. Provide a 2-3 sentence explanation using the knowledge provided above
-3. Be accurate - avoid speculation or unsupported claims
-4. Stay focused on the question - avoid irrelevant information
-5. If knowledge is incomplete, use established medical facts
+CRITICAL RULES TO PREVENT WRONG ANSWERS:
+1. **ONLY use information from the Medical Knowledge above** - Do NOT add external facts
+2. **Choose the answer (A/B/C/D) that EXACTLY matches the provided knowledge**
+3. **If the knowledge is insufficient**, state: "Based on the provided knowledge, [best answer with qualifier]"
+4. **NEVER guess or speculate** - Medical accuracy is critical
+5. **Explain using ONLY facts from the knowledge above** - Cite specific details
+6. **Keep explanation 2-3 sentences maximum** - Be precise and direct
+7. **Double-check your answer** - Ensure it aligns with the provided medical knowledge
 
-FORMAT: Start with the letter (A/B/C/D), then explain in 2-3 sentences.
+MANDATORY FORMAT:
+- Start with the letter only: A. or B. or C. or D.
+- Then provide 2-3 sentence explanation citing the medical knowledge
+- Do NOT add information not present in the provided knowledge
 
-ANSWER:"""
+ANSWER (letter + explanation using only provided knowledge):"""
             
             try:
                 fallback_answer = await query_cohere(fallback_prompt)
