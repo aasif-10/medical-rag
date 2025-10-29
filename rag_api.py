@@ -161,13 +161,16 @@ class QueryResponse(BaseModel):
     answer: str
     contexts: list[str]
 
-async def search_documents(query: str, top_k: int = 3):
+async def search_documents(query: str, top_k: int = 5):
     """
-    Search indexed documents with ENHANCED relevance scoring
+    Search indexed documents with MAXIMUM relevance scoring for RAGAS optimization
     
-    Improvements:
-    1. Query enhancement with medical synonyms
-    2. Better scoring algorithm (keyword density, position, header weight)
+    Optimizations for RAGAS metrics:
+    1. Context Recall: Comprehensive search with 800 chunk limit, 5+ keywords
+    2. Context Precision: Advanced scoring, deduplication, diversity
+    3. Faithfulness support: Clean, focused context extraction
+    4. Answer Relevancy support: Intent-aware context selection
+```
     3. Semantic chunking (keep complete sentences)
     4. Multi-pass filtering for higher precision
     5. Context-aware keyword weighting
@@ -217,31 +220,35 @@ async def search_documents(query: str, top_k: int = 3):
         # Prioritize: multi-word phrases > original query words > expansions
         search_keywords = []
         
-        # First: multi-word phrases (highest precision)
-        for kw in keywords[:2]:
+        # Enhanced keyword strategy for MAXIMUM Context Recall
+        # Use more keywords to ensure we don't miss any relevant information
+        search_keywords = []
+        
+        # 1. Multi-word phrases (highest precision)
+        for kw in keywords[:3]:  # Increased from 2
             if ' ' in kw:
                 search_keywords.append(kw)
         
-        # Then: add original query words (not expansions) - limit to 3 total
+        # 2. Original query words (critical for recall)
         original_words = [w.strip('?,!.').lower() for w in query.split() 
-                         if len(w.strip('?,!.')) > 3]  # Only words longer than 3 chars
+                         if len(w.strip('?,!.')) > 2]  # Lowered from 3 to capture more
         for word in original_words:
-            if word not in search_keywords and len(search_keywords) < 3:
+            if word not in search_keywords and len(search_keywords) < 5:  # Increased from 3
                 search_keywords.append(word)
         
-        # Finally: add most important keyword if we have less than 2
-        if len(search_keywords) < 2:
+        # 3. Add most important expanded keywords
+        if len(search_keywords) < 3:
             for kw in keywords:
-                if kw not in search_keywords and len(search_keywords) < 2:
+                if kw not in search_keywords and len(search_keywords) < 4:
                     search_keywords.append(kw)
         
         print(f"🔎 Optimized search with {len(search_keywords)} keywords: {search_keywords}")
         
-        # Step 2: Multi-keyword search with improved scoring for better RECALL
+        # Step 2: Multi-keyword search with improved scoring for MAXIMUM RECALL
         chunk_scores = {}  # {chunk_text: (score, chunk_data)}
         
-        # Increase limit for better recall (find more relevant information)
-        SEARCH_LIMIT = 500  # Increased from 300 for better context recall
+        # Significantly increase limit for better context recall
+        SEARCH_LIMIT = 800  # Increased from 500 for comprehensive coverage
         
         for keyword in search_keywords:  # Use optimized keyword list
             try:
@@ -322,15 +329,14 @@ async def search_documents(query: str, top_k: int = 3):
                         if chunk_key not in chunk_scores or chunk_scores[chunk_key][0] < score:
                             chunk_scores[chunk_key] = (score, item)
         
-        # Step 3: Sort by relevance score and get top results for PRECISION
-        # Fetch more candidates for better recall, then select best for precision
-        sorted_chunks = sorted(chunk_scores.values(), key=lambda x: x[0], reverse=True)[:top_k * 3]
+        # Step 3: Sort by relevance score and get MORE results for better RECALL
+        # Fetch many more candidates to ensure comprehensive coverage
+        sorted_chunks = sorted(chunk_scores.values(), key=lambda x: x[0], reverse=True)[:top_k * 4]
         
         print(f"📊 Found {len(chunk_scores)} unique chunks, selected top {len(sorted_chunks)} candidates")
         
-        # ADAPTIVE RELEVANCE THRESHOLD: Adjust based on query type for better recall
-        # Lower threshold for MCQs, higher for specific medical queries
-        MIN_RELEVANCE_SCORE = 250  # Lowered for better recall
+        # VERY LOW THRESHOLD for maximum Context Recall - avoid missing relevant info
+        MIN_RELEVANCE_SCORE = 150  # Significantly lowered from 250 for better recall
         if sorted_chunks and sorted_chunks[0][0] < MIN_RELEVANCE_SCORE:
             print(f"⚠️ Top relevance score ({sorted_chunks[0][0]}) below threshold ({MIN_RELEVANCE_SCORE})")
             print(f"   Contexts are likely irrelevant - triggering fallback")
@@ -352,20 +358,22 @@ async def search_documents(query: str, top_k: int = 3):
             if content_hash in seen_content_hashes:
                 continue  # Skip duplicate/similar content
             
-            # Diversity: prefer different pages for broader context recall
-            if page_key in seen_pages and len(final_contexts) < top_k // 2:
-                continue  # Skip if we already have this page and haven't filled half
+            # RELAXED diversity for better RECALL - allow more contexts from same pages
+            # Only skip if we have 3+ from same page already
+            page_count = sum(1 for p in seen_pages if p == page_key)
+            if page_count >= 3:
+                continue
             
             seen_pages.add(page_key)
             seen_content_hashes.add(content_hash)  # Track this content
             
             header = chunk.get("header", "")
             
-            # Step 5: Extract CONCISE, relevant text snippets for PRECISION (200-400 chars)
-            max_context_length = 400  # Keep contexts short and focused
+            # Step 5: Extract LONGER, more comprehensive text snippets for better RECALL
+            max_context_length = 600  # Increased from 400 for more complete information
             
             if len(text) > max_context_length:
-                # Find sentences containing keywords
+                # Find sentences containing keywords - KEEP MORE for better RECALL
                 sentences = re.split(r'[.!?]+', text)
                 relevant_sentences = []
                 
@@ -373,26 +381,26 @@ async def search_documents(query: str, top_k: int = 3):
                     sent_lower = sent.lower()
                     # Prioritize sentences with intent keywords
                     has_intent = any(intent_kw in sent_lower for intent_kw in intent_boosts.keys())
-                    has_keyword = any(kw.lower() in sent_lower for kw in keywords[:5])
+                    has_keyword = any(kw.lower() in sent_lower for kw in keywords[:8])  # Increased from 5
                     
                     if has_intent or has_keyword:
                         relevant_sentences.append(sent.strip())
-                        # Stop if we have 1-2 good sentences
+                        # Keep MORE sentences for comprehensive context (3-4 sentences)
                         if sum(len(s) for s in relevant_sentences) >= max_context_length:
                             break
                 
                 if relevant_sentences:
-                    text = '. '.join(relevant_sentences[:2]) + '.'  # Max 2 sentences
+                    text = '. '.join(relevant_sentences[:4]) + '.'  # Increased from 2 to 4 sentences
                     # Truncate if still too long
                     if len(text) > max_context_length:
                         text = text[:max_context_length].rsplit(' ', 1)[0] + '...'
                 else:
-                    # Fallback: extract around first keyword
+                    # Fallback: extract around first keyword with LARGER window
                     for kw in keywords[:3]:
                         if kw.lower() in text.lower():
                             idx = text.lower().index(kw.lower())
-                            start = max(0, idx - 150)
-                            end = min(len(text), idx + 250)
+                            start = max(0, idx - 200)  # Increased from 150
+                            end = min(len(text), idx + 400)  # Increased from 250
                             text = ("..." if start > 0 else "") + text[start:end]
                             if len(text) > max_context_length:
                                 text = text[:max_context_length].rsplit(' ', 1)[0] + "..."
@@ -608,22 +616,25 @@ Provide a concise, factual medical explanation:"""
                 except Exception as e:
                     print(f"⚠️ Could not generate context: {e}")
             
-            # Enhanced MCQ prompt for better faithfulness and relevancy
+            # Ultra-strict MCQ prompt for maximum faithfulness
             context_text = "\n".join([f"• {ctx}" for ctx in contexts])
             
-            fallback_prompt = f"""You are a medical expert. Answer this multiple choice question accurately and concisely.
+            fallback_prompt = f"""You are a medical expert. Answer this MCQ using the provided knowledge.
 
 QUESTION:
 {request.query}
 
-RELEVANT MEDICAL KNOWLEDGE:
+MEDICAL KNOWLEDGE:
 {context_text}
 
-INSTRUCTIONS:
-1. Choose the correct answer (A, B, C, or D)
-2. Provide a brief 2-3 sentence explanation using medical facts
-3. Be accurate and avoid speculation
-4. Keep your explanation focused and relevant
+STRICT INSTRUCTIONS FOR HIGH ACCURACY:
+1. Choose the correct answer (A, B, C, or D) based on medical facts
+2. Provide a 2-3 sentence explanation using the knowledge provided above
+3. Be accurate - avoid speculation or unsupported claims
+4. Stay focused on the question - avoid irrelevant information
+5. If knowledge is incomplete, use established medical facts
+
+FORMAT: Start with the letter (A/B/C/D), then explain in 2-3 sentences.
 
 ANSWER:"""
             
@@ -703,10 +714,10 @@ Provide a clear, accurate answer in 2-3 sentences. If it's a multiple choice que
                     contexts=[]
                 )
         
-        # Step 2: Build ENHANCED prompt with strict faithfulness and relevancy requirements
+        # Step 2: Build ULTRA-STRICT prompt for MAXIMUM Faithfulness
         context_text = "\n\n".join([f"Context {i+1}:\n{ctx}" for i, ctx in enumerate(contexts)])
         
-        prompt = f"""You are a medical expert AI assistant. Answer the question using ONLY the information provided in the contexts below.
+        prompt = f"""You are a medical expert AI assistant. Your answer MUST be 100% grounded in the provided contexts.
 
 QUESTION: 
 {request.query}
@@ -714,14 +725,16 @@ QUESTION:
 RETRIEVED MEDICAL CONTEXTS:
 {context_text}
 
-CRITICAL INSTRUCTIONS:
-1. **Faithfulness**: Use ONLY facts from the contexts above. Do NOT add external knowledge or speculate.
-2. **Relevancy**: Answer the question directly and completely. Avoid redundant information.
-3. **Conciseness**: Provide 2-3 clear sentences (200-250 characters maximum).
-4. **Citations**: Reference the source when stating facts (e.g., "According to [Document, Page X]...").
-5. **Honesty**: If the contexts don't fully answer the question, state: "Based on the available medical literature, [partial answer]. Complete information on [missing aspect] is not available in the current database."
+ULTRA-STRICT RULES FOR FAITHFULNESS:
+1. **ONLY use information from the contexts above** - Do NOT add any external knowledge
+2. **Quote or paraphrase directly** from the contexts - No speculation or inference
+3. **If information is incomplete**, say: "Based on the provided contexts, [what you found]. However, complete information is not available."
+4. **Answer in 2-3 sentences maximum** (150-200 characters) - Be concise and direct
+5. **Always cite sources**: Mention "[Document, Page X]" when stating facts
+6. **Stay relevant**: Answer the exact question asked, nothing more
+7. **If contexts don't answer the question**, explicitly state: "The provided medical contexts do not contain sufficient information to answer this question."
 
-ANSWER (2-3 sentences, cite sources):"""
+ANSWER (2-3 sentences, cite sources, use ONLY context information):"""
         
         # Step 3: Query Cohere for answer
         answer = await query_cohere(prompt)
